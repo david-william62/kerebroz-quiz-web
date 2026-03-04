@@ -9,6 +9,7 @@ import CyberButton from '@/components/CyberButton';
 const TIME_PER_QUESTION = 30; // seconds
 const BASE_POINTS = 10;
 const MAX_TIME_BONUS = 10;
+const MAX_QUESTIONS = 10;
 
 interface Question {
   id: string;
@@ -31,7 +32,17 @@ interface AnswerRecord {
   timeBonus: number;
 }
 
-type Phase = 'loading' | 'error' | 'quiz' | 'submitting';
+/** Fisher-Yates shuffle, returns a new array */
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+type Phase = 'loading' | 'error' | 'quiz' | 'submitting' | 'done';
 
 export default function QuizPage() {
   const router = useRouter();
@@ -45,6 +56,8 @@ export default function QuizPage() {
   const [answers, setAnswers] = useState<AnswerRecord[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const [doneCountdown, setDoneCountdown] = useState(30);
+
   // Guard: must have registered
   useEffect(() => {
     const user = sessionStorage.getItem('quiz_user');
@@ -54,7 +67,9 @@ export default function QuizPage() {
       .then((r) => r.json())
       .then((data) => {
         if (data.questions && data.questions.length > 0) {
-          setQuestions(data.questions);
+          // Shuffle and pick up to MAX_QUESTIONS random questions
+          const selected = shuffleArray(data.questions as Question[]).slice(0, MAX_QUESTIONS);
+          setQuestions(selected);
           setPhase('quiz');
         } else {
           setErrorMsg('No questions available. Please check back later.');
@@ -66,6 +81,14 @@ export default function QuizPage() {
         setPhase('error');
       });
   }, [router]);
+
+  // Auto-redirect countdown after quiz done
+  useEffect(() => {
+    if (phase !== 'done') return;
+    if (doneCountdown <= 0) { router.replace('/'); return; }
+    const t = setTimeout(() => setDoneCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [phase, doneCountdown, router]);
 
   const advanceQuestion = useCallback((
     option: string | null,
@@ -92,7 +115,7 @@ export default function QuizPage() {
     setAnswers(newAnswers);
 
     if (currentIndex + 1 >= questions.length) {
-      // Submit phase
+      // Build & save result, then show inline summary
       setPhase('submitting');
       const user = JSON.parse(sessionStorage.getItem('quiz_user') ?? '{}');
       const totalScore = newAnswers.reduce((s, a) => s + a.basePoints + a.timeBonus, 0);
@@ -114,11 +137,8 @@ export default function QuizPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(resultPayload),
       })
-        .then(() => router.push('/results'))
-        .catch((e) => {
-          console.error('Submit failed:', e);
-          router.push('/results'); // still redirect on error to prevent being stuck
-        });
+        .catch((e) => console.error('Submit failed:', e))
+        .finally(() => setPhase('done'));
     } else {
       setCurrentIndex((i) => i + 1);
       setSelectedOption(null);
@@ -209,6 +229,173 @@ export default function QuizPage() {
           <p className="font-orbitron" style={{ color: 'var(--neon-green)', fontSize: '0.8rem', letterSpacing: '0.1em' }}>
             SUBMITTING RESULTS...
           </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (phase === 'done') {
+    const resultRaw = sessionStorage.getItem('quiz_result');
+    const result = resultRaw ? JSON.parse(resultRaw) : null;
+    const doneAnswers: AnswerRecord[] = result ? (() => { try { return JSON.parse(result.answers); } catch { return []; } })() : [];
+    const maxScore = (result?.totalQuestions ?? 0) * 20;
+    const scorePct = maxScore > 0 ? Math.round(((result?.totalScore ?? 0) / maxScore) * 100) : 0;
+    const scoreColor = scorePct >= 70 ? 'var(--neon-green)' : scorePct >= 40 ? 'var(--cyan)' : 'var(--danger)';
+    const rankLabel = scorePct >= 80 ? '🏆 EXCEPTIONAL' : scorePct >= 60 ? '⚡ PROFICIENT' : scorePct >= 40 ? '🔷 COMPETENT' : '🔹 KEEP PRACTICING';
+    const timeBonus = doneAnswers.reduce((s, a) => s + a.timeBonus, 0);
+
+    return (
+      <main style={{ minHeight: '100vh', position: 'relative', paddingBottom: '4rem' }}>
+        <CircuitBackground />
+
+        {/* Top bar */}
+        <div style={{
+          position: 'relative', zIndex: 1,
+          padding: '1rem 1.5rem',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          borderBottom: '1px solid var(--border-dim)',
+          background: 'rgba(0,0,0,0.3)',
+          backdropFilter: 'blur(8px)',
+        }}>
+          <span className="font-orbitron" style={{ color: 'var(--cyan)', fontSize: '0.8rem', letterSpacing: '0.1em' }}>EKTHA TECH QUIZ</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+            Returning home in{' '}
+            <span className="font-orbitron" style={{ color: doneCountdown <= 10 ? 'var(--danger)' : 'var(--cyan)' }}>{doneCountdown}s</span>
+          </span>
+        </div>
+
+        <div style={{
+          position: 'relative', zIndex: 1,
+          maxWidth: '720px', margin: '0 auto',
+          padding: '2rem 1rem',
+          display: 'flex', flexDirection: 'column', gap: '1.5rem',
+        }}>
+
+          {/* Hero score card */}
+          <div className="glass-card glow-border animate-fade-in-up" style={{ padding: '2rem', textAlign: 'center' }}>
+            <div className="badge badge-cyan" style={{ marginBottom: '1rem' }}>QUIZ COMPLETE — {MAX_QUESTIONS} QUESTIONS</div>
+
+            <div className="font-orbitron" style={{
+              fontSize: 'clamp(3rem, 12vw, 5rem)',
+              fontWeight: 900,
+              color: scoreColor,
+              textShadow: `0 0 24px ${scoreColor}80`,
+              lineHeight: 1,
+              marginBottom: '0.25rem',
+            }}>
+              {result?.totalScore ?? 0}
+            </div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '1rem' }}>out of {maxScore} points</div>
+
+            {/* Score bar */}
+            <div className="progress-bar-track" style={{ maxWidth: '300px', margin: '0 auto 1rem', height: '6px' }}>
+              <div style={{
+                height: '100%',
+                width: `${scorePct}%`,
+                background: scoreColor,
+                borderRadius: '3px',
+                boxShadow: `0 0 10px ${scoreColor}80`,
+                transition: 'width 1.5s ease',
+              }} />
+            </div>
+
+            <div className="font-orbitron" style={{ color: scoreColor, fontSize: '0.85rem', letterSpacing: '0.1em', marginBottom: '1.5rem' }}>
+              {rankLabel}
+            </div>
+
+            {result && (
+              <p style={{ color: 'var(--text-primary)', fontSize: '1rem' }}>
+                {result.name}
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginLeft: '0.5rem' }}>({result.registerNo})</span>
+              </p>
+            )}
+          </div>
+
+          {/* Stat breakdown */}
+          <div className="animate-fade-in-up delay-100" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
+            {[
+              { label: 'CORRECT', value: `${result?.correctCount ?? 0} / ${result?.totalQuestions ?? 0}`, color: 'var(--neon-green)' },
+              { label: 'BASE PTS', value: (result?.correctCount ?? 0) * 10, color: 'var(--cyan)' },
+              { label: 'TIME BONUS', value: timeBonus, color: 'var(--warning)' },
+            ].map((stat) => (
+              <div key={stat.label} className="glass-card" style={{ padding: '1rem', textAlign: 'center' }}>
+                <div className="font-orbitron" style={{ fontSize: 'clamp(1.2rem, 5vw, 1.8rem)', fontWeight: 700, color: stat.color, marginBottom: '0.25rem' }}>
+                  {stat.value}
+                </div>
+                <div style={{ fontFamily: 'Orbitron, monospace', fontSize: '0.6rem', color: 'var(--text-muted)', letterSpacing: '0.1em' }}>
+                  {stat.label}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Per-question review */}
+          <div className="animate-fade-in-up delay-200">
+            <h2 className="font-orbitron" style={{ fontSize: '0.85rem', color: 'var(--cyan)', letterSpacing: '0.1em', marginBottom: '1rem' }}>
+              QUESTION BREAKDOWN
+            </h2>
+            <div className="glass-card" style={{ padding: 0, overflow: 'hidden' }}>
+              <div style={{ overflowX: 'auto' }}>
+                <table className="cyber-table" style={{ minWidth: '560px' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: '32px' }}>#</th>
+                      <th>QUESTION</th>
+                      <th>YOUR ANSWER</th>
+                      <th>CORRECT</th>
+                      <th>PTS</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {doneAnswers.map((a, i) => (
+                      <tr key={a.questionId}>
+                        <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
+                        <td style={{ maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.question}</td>
+                        <td>
+                          {a.userAnswer === null ? (
+                            <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>skipped</span>
+                          ) : (
+                            <span style={{ color: a.isCorrect ? 'var(--neon-green)' : 'var(--danger)' }}>
+                              {a.isCorrect ? '✓' : '✗'} {a.userAnswer}: {a.options[a.userAnswer as keyof typeof a.options]}
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ color: 'var(--neon-green)' }}>
+                          {a.correctAnswer}: {a.options[a.correctAnswer as keyof typeof a.options]}
+                        </td>
+                        <td>
+                          <span className="font-orbitron" style={{ color: 'var(--cyan)', fontSize: '0.8rem' }}>
+                            {a.basePoints + a.timeBonus}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <div className="animate-fade-in-up delay-300" style={{ display: 'flex', gap: '1rem', justifyContent: 'center', flexWrap: 'wrap' }}>
+            <CyberButton variant="primary" onClick={() => router.push('/results')}>
+              VIEW FULL RESULTS →
+            </CyberButton>
+            <CyberButton variant="danger" onClick={() => {
+              sessionStorage.removeItem('quiz_user');
+              sessionStorage.removeItem('quiz_result');
+              router.replace('/');
+            }}>
+              EXIT QUIZ
+            </CyberButton>
+          </div>
+
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+            Auto-returning to home in{' '}
+            <span className="font-orbitron" style={{ color: doneCountdown <= 10 ? 'var(--danger)' : 'var(--cyan)' }}>
+              {doneCountdown}s
+            </span>
+          </div>
         </div>
       </main>
     );
